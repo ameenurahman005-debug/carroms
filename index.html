@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Carrom Board Game</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #1a1a1a;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+
+        .controls {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            background: #2a2a2a;
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+
+        select, button {
+            padding: 8px 12px;
+            font-size: 14px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            background: #444;
+            color: #fff;
+        }
+
+        button:hover, select:hover {
+            background: #555;
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        canvas {
+            background: #e6c280;
+            border: 20px solid #5c3a21;
+            border-radius: 12px;
+            display: block;
+        }
+
+        .status-panel {
+            margin-top: 15px;
+            display: flex;
+            gap: 30px;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .aim-slider {
+            width: 500px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Carrom Board Game</h1>
+
+    <div class="controls">
+        <label for="mode">Game Mode:</label>
+        <select id="mode" onchange="resetGame()">
+            <option value="pvp">2 Players (Local)</option>
+            <option value="ai" selected>Player vs AI</option>
+        </select>
+
+        <label for="difficulty">AI Level:</label>
+        <select id="difficulty" onchange="resetGame()">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+        </select>
+
+        <button onclick="resetGame()">Reset Game</button>
+    </div>
+
+    <div id="game-container">
+        <canvas id="board" width="600" height="600"></canvas>
+    </div>
+
+    <div class="status-panel">
+        <div>Turn: <span id="turn-text" style="color: #4CAF50;">Player 1</span></div>
+        <div>Player 1 Score: <span id="p1-score">0</span></div>
+        <div>Player 2 / AI Score: <span id="p2-score">0</span></div>
+    </div>
+
+    <p style="color: #aaa; font-size: 14px; margin-top: 10px;">
+        <strong>How to Play:</strong> Drag the slider or click & drag on the striker baseline to position. Click on the board to aim and shoot!
+    </p>
+
+    <script>
+        const canvas = document.getElementById('board');
+        const ctx = canvas.getContext('2d');
+
+        // Game Configuration
+        const BOARD_SIZE = 600;
+        const FRICTION = 0.985;
+        const POCKET_RADIUS = 28;
+        const STRIKER_RADIUS = 18;
+        const PIECE_RADIUS = 13;
+
+        // Pockets positions
+        const POCKETS = [
+            { x: 35, y: 35 },
+            { x: BOARD_SIZE - 35, y: 35 },
+            { x: 35, y: BOARD_SIZE - 35 },
+            { x: BOARD_SIZE - 35, y: BOARD_SIZE - 35 }
+        ];
+
+        // State Variables
+        let pieces = [];
+        let striker = null;
+        let currentPlayer = 1; // 1 or 2
+        let scores = { 1: 0, 2: 0 };
+        let gameState = 'AIMING'; // AIMING, MOVING, AI_THINKING
+        let aimAngle = 0;
+        let aimPower = 0;
+        let isDragging = false;
+
+        class Piece {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.type = type; // 'white', 'black', 'red', 'striker'
+                this.radius = type === 'striker' ? STRIKER_RADIUS : PIECE_RADIUS;
+                this.mass = type === 'striker' ? 2 : 1;
+                this.inPocket = false;
+            }
+
+            draw() {
+                if (this.inPocket) return;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+
+                if (this.type === 'white') ctx.fillStyle = '#fff8dc';
+                else if (this.type === 'black') ctx.fillStyle = '#222';
+                else if (this.type === 'red') ctx.fillStyle = '#d9534f';
+                else if (this.type === 'striker') ctx.fillStyle = '#0275d8';
+
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#000';
+                ctx.stroke();
+                ctx.closePath();
+            }
+
+            update() {
+                if (this.inPocket) return;
+
+                this.x += this.vx;
+                this.y += this.vy;
+
+                this.vx *= FRICTION;
+                this.vy *= FRICTION;
+
+                if (Math.abs(this.vx) < 0.05) this.vx = 0;
+                if (Math.abs(this.vy) < 0.05) this.vy = 0;
+
+                // Wall Collisions
+                if (this.x - this.radius < 0) { this.x = this.radius; this.vx *= -1; }
+                if (this.x + this.radius > BOARD_SIZE) { this.x = BOARD_SIZE - this.radius; this.vx *= -1; }
+                if (this.y - this.radius < 0) { this.y = this.radius; this.vy *= -1; }
+                if (this.y + this.radius > BOARD_SIZE) { this.y = BOARD_SIZE - this.radius; this.vy *= -1; }
+
+                // Check Pocketing
+                POCKETS.forEach(p => {
+                    let dist = Math.hypot(this.x - p.x, this.y - p.y);
+                    if (dist < POCKET_RADIUS) {
+                        this.inPocket = true;
+                        this.vx = 0;
+                        this.vy = 0;
+                        handlePocketEvent(this);
+                    }
+                });
+            }
+        }
+
+        function initPieces() {
+            pieces = [];
+            const centerX = BOARD_SIZE / 2;
+            const centerY = BOARD_SIZE / 2;
+
+            // Red Queen
+            pieces.push(new Piece(centerX, centerY, 'red'));
+
+            // Inner Ring
+            const layout = ['white', 'black', 'white', 'black', 'white', 'black'];
+            for (let i = 0; i < 6; i++) {
+                let angle = (i * 60) * Math.PI / 180;
+                let r = PIECE_RADIUS * 2.2;
+                pieces.push(new Piece(centerX + r * Math.cos(angle), centerY + r * Math.sin(angle), layout[i]));
+            }
+
+            // Striker Initialization
+            resetStrikerPosition();
+        }
+
+        function resetStrikerPosition() {
+            let y = currentPlayer === 1 ? BOARD_SIZE - 80 : 80;
+            striker = new Piece(BOARD_SIZE / 2, y, 'striker');
+            pieces.push(striker);
+        }
+
+        function resolveCollisions() {
+            for (let i = 0; i < pieces.length; i++) {
+                for (let j = i + 1; j < pieces.length; j++) {
+                    let p1 = pieces[i];
+                    let p2 = pieces[j];
+
+                    if (p1.inPocket || p2.inPocket) continue;
+
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let dist = Math.hypot(dx, dy);
+
+                    if (dist < p1.radius + p2.radius) {
+                        // Elastic collision physics
+                        let angle = Math.atan2(dy, dx);
+                        let sin = Math.sin(angle), cos = Math.cos(angle);
+
+                        // Rotate velocities
+                        let vx1 = p1.vx * cos + p1.vy * sin;
+                        let vy1 = p1.vy * cos - p1.vx * sin;
+                        let vx2 = p2.vx * cos + p2.vy * sin;
+                        let vy2 = p2.vy * cos - p2.vx * sin;
+
+                        // Momentum conservation
+                        let final_vx1 = ((p1.mass - p2.mass) * vx1 + 2 * p2.mass * vx2) / (p1.mass + p2.mass);
+                        let final_vx2 = ((p2.mass - p1.mass) * vx2 + 2 * p1.mass * vx1) / (p1.mass + p2.mass);
+
+                        p1.vx = final_vx1 * cos - vy1 * sin;
+                        p1.vy = vy1 * cos + final_vx1 * sin;
+                        p2.vx = final_vx2 * cos - vy2 * sin;
+                        p2.vy = vy2 * cos + final_vx2 * sin;
+
+                        // Separate overlapping pieces
+                        let overlap = (p1.radius + p2.radius) - dist;
+                        p1.x -= overlap/2 * cos;
+                        p1.y -= overlap/2 * sin;
+                        p2.x += overlap/2 * cos;
+                        p2.y += overlap/2 * sin;
+                    }
+                }
+            }
+        }
+
+        function handlePocketEvent(piece) {
+            if (piece.type === 'striker') {
+                scores[currentPlayer] = Math.max(0, scores[currentPlayer] - 1);
+            } else if (piece.type === 'white') {
+                scores[currentPlayer] += 10;
+            } else if (piece.type === 'black') {
+                scores[currentPlayer] += 5;
+            } else if (piece.type === 'red') {
+                scores[currentPlayer] += 25;
+            }
+            updateUI();
+        }
+
+        function drawBoard() {
+            ctx.clearRect(0, 0, BOARD_SIZE, BOARD_SIZE);
+
+            // Draw Pockets
+            POCKETS.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, POCKET_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = '#333';
+                ctx.fill();
+                ctx.closePath();
+            });
+
+            // Center Circle
+            ctx.beginPath();
+            ctx.arc(BOARD_SIZE / 2, BOARD_SIZE / 2, 40, 0, Math.PI * 2);
+            ctx.strokeStyle = '#a65b29';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Baseline Top & Bottom
+            ctx.strokeStyle = '#a65b29';
+            ctx.lineWidth = 2;
+            [80, BOARD_SIZE - 80].forEach(y => {
+                ctx.beginPath();
+                ctx.moveTo(100, y);
+                ctx.lineTo(BOARD_SIZE - 100, y);
+                ctx.stroke();
+            });
+        }
+
+        function drawAimLine() {
+            if (gameState !== 'AIMING' || !striker) return;
+
+            ctx.beginPath();
+            ctx.moveTo(striker.x, striker.y);
+            ctx.lineTo(
+                striker.x + Math.cos(aimAngle) * aimPower,
+                striker.y + Math.sin(aimAngle) * aimPower
+            );
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.7)';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        function gameLoop() {
+            drawBoard();
+
+            let moving = false;
+            pieces.forEach(p => {
+                p.update();
+                p.draw();
+                if (p.vx !== 0 || p.vy !== 0) moving = true;
+            });
+
+            resolveCollisions();
+
+            if (gameState === 'MOVING' && !moving) {
+                switchTurn();
+            } else if (gameState === 'AIMING') {
+                drawAimLine();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function switchTurn() {
+            // Remove potted striker
+            pieces = pieces.filter(p => p !== striker && !p.inPocket);
+            currentPlayer = currentPlayer === 1 ? 2 : 1;
+
+            updateUI();
+            resetStrikerPosition();
+            gameState = 'AIMING';
+
+            let mode = document.getElementById('mode').value;
+            if (mode === 'ai' && currentPlayer === 2) {
+                gameState = 'AI_THINKING';
+                setTimeout(playAITurn, 800);
+            }
+        }
+
+        function playAITurn() {
+            let difficulty = document.getElementById('difficulty').value;
+            let activePieces = pieces.filter(p => !p.inPocket && p.type !== 'striker');
+
+            if (activePieces.length === 0) return;
+
+            // Simple Target Selection: Nearest Piece
+            let target = activePieces[0];
+            let minDist = Infinity;
+
+            activePieces.forEach(p => {
+                let d = Math.hypot(p.x - striker.x, p.y - striker.y);
+                if (d < minDist) {
+                    minDist = d;
+                    target = p;
+                }
+            });
+
+            // Position Striker
+            striker.x = Math.min(Math.max(target.x, 120), BOARD_SIZE - 120);
+
+            // Compute ideal angle
+            let dx = target.x - striker.x;
+            let dy = target.y - striker.y;
+            let baseAngle = Math.atan2(dy, dx);
+
+            // Add Artificial Error / Imprecision based on Difficulty
+            let errorMargin = 0;
+            if (difficulty === 'easy') errorMargin = (Math.random() - 0.5) * 0.6;
+            else if (difficulty === 'medium') errorMargin = (Math.random() - 0.5) * 0.25;
+            else if (difficulty === 'hard') errorMargin = (Math.random() - 0.5) * 0.05;
+
+            let finalAngle = baseAngle + errorMargin;
+            let power = Math.min(Math.hypot(dx, dy) * 0.1, 18);
+
+            // Execute Shot
+            striker.vx = Math.cos(finalAngle) * power;
+            striker.vy = Math.sin(finalAngle) * power;
+
+            gameState = 'MOVING';
+        }
+
+        // Input Handlers
+        canvas.addEventListener('mousemove', (e) => {
+            if (gameState !== 'AIMING' || (document.getElementById('mode').value === 'ai' && currentPlayer === 2)) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            if (isDragging) {
+                // Adjust Baseline Position
+                let minY = currentPlayer === 1 ? BOARD_SIZE - 80 : 80;
+                striker.x = Math.min(Math.max(mouseX, 100), BOARD_SIZE - 100);
+                striker.y = minY;
+            } else {
+                // Aim Angle & Power Calculation
+                let dx = mouseX - striker.x;
+                let dy = mouseY - striker.y;
+                aimAngle = Math.atan2(dy, dx);
+                aimPower = Math.min(Math.hypot(dx, dy), 150);
+            }
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (gameState !== 'AIMING') return;
+            let rect = canvas.getBoundingClientRect();
+            let mouseX = e.clientX - rect.left;
+            let mouseY = e.clientY - rect.top;
+
+            // Click near striker to drag position
+            if (Math.hypot(mouseX - striker.x, mouseY - striker.y) < STRIKER_RADIUS * 2) {
+                isDragging = true;
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                return;
+            }
+
+            if (gameState === 'AIMING' && aimPower > 10) {
+                let speed = aimPower * 0.12;
+                striker.vx = Math.cos(aimAngle) * speed;
+                striker.vy = Math.sin(aimAngle) * speed;
+                gameState = 'MOVING';
+            }
+        });
+
+        function updateUI() {
+            document.getElementById('p1-score').innerText = scores[1];
+            document.getElementById('p2-score').innerText = scores[2];
+            let mode = document.getElementById('mode').value;
+            let p2Name = mode === 'ai' ? 'AI Bot' : 'Player 2';
+            document.getElementById('turn-text').innerText = currentPlayer === 1 ? 'Player 1' : p2Name;
+        }
+
+        function resetGame() {
+            scores = { 1: 0, 2: 0 };
+            currentPlayer = 1;
+            gameState = 'AIMING';
+            updateUI();
+            initPieces();
+        }
+
+        // Start Game
+        resetGame();
+        gameLoop();
+    </script>
+</body>
+</html>
